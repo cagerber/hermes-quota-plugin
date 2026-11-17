@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from .base import AccountBalance, QuotaResult, QuotaWindow, build_unavailable, urlopen_no_redirect
@@ -41,6 +44,43 @@ _COOKIE_NAMES = (
 )
 _REQUIRED_COOKIES = {"api-platform_serviceToken", "userId"}
 _TIMEOUT_S = 12.0
+_COOKIE_BRIDGE = Path(__file__).resolve().parents[1] / "scripts" / "xiaomi_cookie.py"
+
+
+def _bridge_header() -> tuple[Optional[str], Optional[str]]:
+    """Read the browser session with a Python that has crypto+secretstorage.
+
+    Hermes' bundled interpreter is deliberately minimal; the desktop Python
+    normally has both packages.  The helper returns only the selected cookies.
+    """
+    if not _COOKIE_BRIDGE.is_file():
+        return None, "browser-session-unreadable"
+    candidates = [shutil.which("python3"), "/usr/bin/python3"]
+    seen: set[str] = set()
+    for executable in candidates:
+        if not executable or executable in seen:
+            continue
+        seen.add(executable)
+        try:
+            completed = subprocess.run(
+                [executable, str(_COOKIE_BRIDGE)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode != 0 or not (completed.stdout or "").strip():
+            continue
+        try:
+            payload = json.loads(completed.stdout)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("header"), str) and payload["header"].strip():
+            return payload["header"].strip(), None
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        return None, str(reason or "browser-session-unreadable")
+    return None, "browser-session-unreadable"
 
 
 def _cookie_header() -> tuple[Optional[str], Optional[str]]:
@@ -63,7 +103,15 @@ def _cookie_header() -> tuple[Optional[str], Optional[str]]:
         return None, "browser-session-required"
     except Exception as exc:  # noqa: BLE001 - browser store is optional
         reason = getattr(exc, "reason", None)
-        return None, str(reason or "browser-session-unreadable")
+        reason = str(reason or "browser-session-unreadable")
+        if reason in {
+            "chrome-crypto-missing",
+            "chrome-decrypt-failed",
+            "chrome-keychain-denied",
+            "browser-session-unreadable",
+        }:
+            return _bridge_header()
+        return None, reason
 
 
 def _get(path: str, cookie: str, *, timeout: float = _TIMEOUT_S) -> tuple[Optional[dict[str, Any]], Optional[str]]:
