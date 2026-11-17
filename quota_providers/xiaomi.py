@@ -55,8 +55,9 @@ def _bridge_header() -> tuple[Optional[str], Optional[str]]:
     """
     if not _COOKIE_BRIDGE.is_file():
         return None, "browser-session-unreadable"
-    candidates = [shutil.which("python3"), "/usr/bin/python3"]
+    candidates = ["/usr/bin/python3", shutil.which("python3")]
     seen: set[str] = set()
+    last_reason: str | None = None
     for executable in candidates:
         if not executable or executable in seen:
             continue
@@ -79,8 +80,8 @@ def _bridge_header() -> tuple[Optional[str], Optional[str]]:
         if isinstance(payload, dict) and isinstance(payload.get("header"), str) and payload["header"].strip():
             return payload["header"].strip(), None
         reason = payload.get("reason") if isinstance(payload, dict) else None
-        return None, str(reason or "browser-session-unreadable")
-    return None, "browser-session-unreadable"
+        last_reason = str(reason or "browser-session-unreadable")
+    return None, last_reason or "browser-session-unreadable"
 
 
 def _cookie_header() -> tuple[Optional[str], Optional[str]]:
