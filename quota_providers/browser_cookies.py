@@ -325,10 +325,60 @@ def _linux_keyring_password(app: str) -> Optional[str]:
     return None
 
 
+def _secret_service_password(app: str) -> Optional[str]:
+    """Read a Linux Safe Storage secret through Secret Service.
+
+    ``secret-tool`` is part of libsecret-tools and is not installed on every
+    desktop.  ``secretstorage`` talks to the same running gnome-keyring daemon
+    without a subprocess.  The secret is returned to the caller and is never
+    logged.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import secretstorage  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    labels = {
+        "chrome": "Chrome Safe Storage",
+        "chromium": "Chromium Safe Storage",
+        "brave": "Brave Safe Storage",
+    }
+    wanted_label = labels.get(app, "")
+    try:
+        connection = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(connection)
+        if collection.is_locked():
+            return None
+        for item in collection.get_all_items():
+            attributes = item.get_attributes()
+            label = item.get_label()
+            if label != wanted_label and attributes.get("application") != app:
+                continue
+            secret = item.get_secret()
+            if isinstance(secret, (bytes, bytearray)):
+                secret = secret.decode("utf-8", "replace")
+            secret = str(secret or "").strip()
+            if secret:
+                return secret
+    except Exception:  # noqa: BLE001 - keyring absence/denial is a normal miss
+        logger.debug("browser_cookies ▸ Secret Service lookup failed for %s", app, exc_info=True)
+    return None
+
+
 def _chrome_safe_storage_password(app: str = "chrome") -> Optional[str]:
     """Safe Storage password for one browser, or None when unavailable."""
     if sys.platform.startswith("linux"):
-        return _linux_keyring_password(app)
+        password = _linux_keyring_password(app)
+        if password:
+            return password
+        # Only fall through to Secret Service when secret-tool itself is
+        # absent.  If it is installed and returned no matching item, that is
+        # the keyring's answer; probing a second backend could select another
+        # app's similarly named entry.
+        if shutil.which("secret-tool"):
+            return None
+        return _secret_service_password(app)
     if sys.platform != "darwin":
         return None
     if app != "chrome":
@@ -642,6 +692,107 @@ def load_chrome_grok_cookies() -> Optional[str]:
                         raise
                     # Soft failure: record the typed reason and try the next
                     # candidate key / source database instead of aborting.
+                    decrypt_reason = exc.reason
+                    value = None
+                    continue
+                except Exception as exc:
+                    raise ChromeCookieError("chrome-decrypt-failed") from exc
+                if value:
+                    break
+            if value:
+                pairs.append((str(name), value))
+        header = _cookie_header(iter(pairs))
+        if header:
+            return header
+
+    if decrypt_reason:
+        raise ChromeCookieError(decrypt_reason)
+    return None
+
+
+def load_chrome_cookie_header(
+    domain: str,
+    names: Optional[tuple[str, ...]] = None,
+) -> Optional[str]:
+    """Cookie header for *domain* from a local Chromium-family profile.
+
+    This is the domain-parameterised form of :func:`load_chrome_grok_cookies`.
+    ``names`` limits the returned header to the named cookies; a provider that
+    requires a particular session should pass its own allowlist so unrelated
+    cookies are never sent.
+
+    On Linux the Safe Storage secret is read from Secret Service when
+    ``secret-tool`` is unavailable.  A keyring denial returns None; a key that
+    exists but cannot decrypt a cookie raises :class:`ChromeCookieError` so the
+    caller can report a truthful reason.
+    """
+    if not domain:
+        return None
+    if sys.platform not in {"darwin", "win32"} and not sys.platform.startswith("linux"):
+        return None
+    try:
+        sources = chrome_cookie_dbs()
+    except ChromeCookieError:
+        raise
+    except OSError as exc:
+        if _is_tcc_error(exc):
+            _raise_chrome_tcc()
+        return None
+
+    now = time.time()
+    cutoff = _chrome_expiry_cutoff(now)
+    keys_by_app: dict[str, list[bytes]] = {}
+    decrypt_reason: Optional[str] = None
+    suffix = f"%.{domain}"
+    allowed = set(names) if names else None
+
+    for source in sources:
+        try:
+            with _copied_sqlite(source) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT name, host_key, encrypted_value, expires_utc
+                    FROM cookies
+                    WHERE (host_key = ? OR host_key LIKE ?)
+                      AND (expires_utc IS NULL OR expires_utc <= 0 OR expires_utc > ?)
+                    ORDER BY host_key, name
+                    """,
+                    (domain, suffix, cutoff),
+                ).fetchall()
+        except OSError as exc:
+            if _is_tcc_error(exc):
+                _raise_chrome_tcc()
+            continue
+        except sqlite3.Error:
+            logger.debug(
+                "browser_cookies ▸ unreadable Chrome cookie DB (skip): %s",
+                source,
+                exc_info=True,
+            )
+            continue
+
+        pairs: list[tuple[str, str]] = []
+        for name, host_key, blob, expires_utc in rows:
+            if not name or (allowed is not None and str(name) not in allowed):
+                continue
+            if not _chrome_expires_ok(expires_utc, now):
+                continue
+            if not isinstance(blob, (bytes, bytearray)):
+                continue
+            app = _chrome_app_for_path(source)
+            keys = keys_by_app.get(app)
+            if keys is None:
+                keys = _chrome_aes_keys(app, source)
+                keys_by_app[app] = keys
+            value: Optional[str] = None
+            for candidate in keys:
+                try:
+                    value = decrypt_chrome_cookie_value(
+                        candidate, bytes(blob), host_key=str(host_key or "")
+                    )
+                except ChromeCookieError as exc:
+                    if exc.reason in _HARD_CHROME_FAILURES:
+                        raise
                     decrypt_reason = exc.reason
                     value = None
                     continue

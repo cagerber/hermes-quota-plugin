@@ -17,6 +17,7 @@ export const PROVIDER_NAMES = {
   'opencode-go': 'OpenCode Go', copilot: 'Copilot', zai: 'Z.ai',
   commandcode: 'CommandCode', cursor: 'Cursor', antigravity: 'Antigravity',
   minimax: 'MiniMax', ollama: 'Ollama',
+  clinepass: 'ClinePass', 'xiaomi-token-plan-sgp': 'Xiaomi Token Plan (SGP)',
 };
 
 function friendlyName(id, record, account) {

@@ -110,6 +110,41 @@ def _core_anthropic_is_oauth(token: str) -> Optional[bool]:
         return None
 
 
+def _core_anthropic_oauth_token() -> Optional[str]:
+    """Resolve an Anthropic OAuth token without falling through to an API key.
+
+    ``resolve_anthropic_token()`` deliberately gives an explicit
+    ``ANTHROPIC_API_KEY`` priority.  That is right for inference and wrong for
+    the account-usage endpoint, which only accepts OAuth and returns an
+    ``auth-failed``/API-key-only card otherwise.  Read the OAuth sources
+    directly: env OAuth tokens, Hermes-owned grants, then the borrowed Claude
+    Code login.  Never returns an API key.
+    """
+    try:
+        from agent.anthropic_credentials import (
+            _first_env,
+            _resolve_anthropic_pool_token,
+            _resolve_claude_code_token_from_credentials,
+            read_claude_code_credentials,
+        )
+    except Exception:  # noqa: BLE001 - older core, or standalone plugin
+        token = _core_anthropic_token()
+        return token if token and _core_anthropic_is_oauth(token) is not False else None
+
+    try:
+        token = ( _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN") or "" ).strip()
+        if token and _core_anthropic_is_oauth(token) is not False:
+            return token
+        token = (_resolve_anthropic_pool_token(skip_borrowed=True) or "").strip()
+        if token:
+            return token
+        creds = read_claude_code_credentials()
+        token = (_resolve_claude_code_token_from_credentials(creds) or "").strip() if creds else None
+        return token or None
+    except Exception:  # noqa: BLE001 - usage display must fail open
+        return None
+
+
 _ANTHROPIC_OAUTH_REQUIRED_REASON = (
     "Anthropic account limits are only available for OAuth-backed Claude accounts."
 )
@@ -604,8 +639,13 @@ def _request_anthropic_usage_locked(
 
 def _anthropic_usage_payload() -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """Fetch the OAuth usage payload once for the core-resolved account."""
-    token = _core_anthropic_token()
+    token = _core_anthropic_oauth_token()
     if not token:
+        # Preserve the useful distinction between "no Claude login at all" and
+        # "an API key is configured, but this endpoint needs OAuth".
+        fallback = _core_anthropic_token()
+        if fallback and _core_anthropic_is_oauth(fallback) is False:
+            return None, _ANTHROPIC_OAUTH_REQUIRED_REASON
         return None, "no-credentials"
     if _core_anthropic_is_oauth(token) is False:
         return None, _ANTHROPIC_OAUTH_REQUIRED_REASON

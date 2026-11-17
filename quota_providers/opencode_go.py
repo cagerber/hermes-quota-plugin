@@ -95,6 +95,10 @@ def _auth_file_candidates() -> tuple[str, ...]:
 
 
 _AUTH_PATHS = _auth_file_candidates()
+# Pi's provider store is a separate copy of the OpenCode Zen key.  On this
+# machine Hermes' OPENCODE_GO_API_KEY can be an expired key while Pi continues
+# to use the live one, so read the Pi store as an additional read-only source.
+_PI_AUTH_PATHS = (os.path.expanduser("~/.pi/agent/auth.json"),)
 # ``OPENCODE_API_KEY`` is the name OpenCode's own CLI and CodexBar use for the
 # Zen key.  Hermes' *chat* provider ``opencode-go`` stores the same Zen key
 # under ``OPENCODE_GO_API_KEY`` in ``~/.hermes/.env``, so a machine can hold a
@@ -200,6 +204,23 @@ def _load_auth_file_key() -> Optional[str]:
                 key = _extract_api_key(data[provider])
                 if key:
                     return key
+    return None
+
+
+def _load_pi_auth_key() -> Optional[str]:
+    """Read the live OpenCode Go key from Pi's provider store, if present."""
+    for path in _PI_AUTH_PATHS:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for provider in ("opencode-go", "opencode", "opencode-zen", "zen"):
+            key = _extract_api_key(data.get(provider))
+            if key:
+                return key
     return None
 
 
@@ -549,6 +570,7 @@ def fetch_opencode_go_quota() -> QuotaResult:
     windows: list[QuotaWindow] = []
     plan: Optional[str] = None
     failed: list[str] = []
+    auth_failed = False
     for index, (token, label) in enumerate(entries):
         if deadline.expired():
             failed.extend(f"{pending_label}: timeout" for _, pending_label in entries[index:])
@@ -556,6 +578,8 @@ def fetch_opencode_go_quota() -> QuotaResult:
         res = fetch_usage(token, deadline=deadline)
         if res.unavailable_reason:
             failed.append(f"{label}: {res.unavailable_reason}")
+            if res.unavailable_reason == "auth-failed":
+                auth_failed = True
             continue
         plan = plan or res.plan
         # A single key needs no suffix: the window names already say enough.
@@ -569,6 +593,25 @@ def fetch_opencode_go_quota() -> QuotaResult:
                     reset_at=w.reset_at,
                 )
             )
+    if not windows and auth_failed:
+        # Pi keeps its own copy of the Zen key and can remain authenticated
+        # after Hermes' OPENCODE_GO_API_KEY expires.  This is a last-resort
+        # read-only fallback, not another account in the Hermes pool.
+        pi_key = _load_pi_auth_key()
+        if pi_key and all(pi_key != token for token, _label in entries):
+            res = fetch_usage(pi_key, deadline=deadline)
+            if res.unavailable_reason:
+                failed.append(f"pi: {res.unavailable_reason}")
+            else:
+                plan = res.plan
+                for w in res.windows:
+                    windows.append(
+                        QuotaWindow(
+                            label=f"{w.label} · pi",
+                            used_percent=w.used_percent,
+                            reset_at=w.reset_at,
+                        )
+                    )
     if not windows:
         return build_unavailable(_PROVIDER_ID, "no-data", details=failed)
     return QuotaResult(

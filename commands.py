@@ -63,6 +63,8 @@ _PROVIDER_NAMES = {
     "antigravity": "Antigravity",
     "minimax": "MiniMax",
     "ollama": "Ollama",
+    "clinepass": "ClinePass",
+    "xiaomi-token-plan-sgp": "Xiaomi Token Plan (SGP)",
 }
 
 # Words a user actually types for a provider. Only used to resolve a
@@ -76,6 +78,9 @@ _PROVIDER_ALIASES = {
     "moonshot": "kimi",
     "xai": "grok",
     "opencode": "opencode-go",
+    "cline": "clinepass",
+    "xiaomi": "xiaomi-token-plan-sgp",
+    "mimo": "xiaomi-token-plan-sgp",
 }
 
 # A row with no credential is a provider this machine has never configured: it
