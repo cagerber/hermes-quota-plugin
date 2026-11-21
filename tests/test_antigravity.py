@@ -256,7 +256,7 @@ class PlanTests(unittest.TestCase):
     def test_paid_tier_wins_over_current_tier(self):
         # Live payload: currentTier is free-tier even on a paid account.
         with mock.patch.object(mod, "_post", return_value=(_LOAD, None)):
-            self.assertEqual(mod._plan("t"), "Google AI Pro")
+            self.assertEqual(mod._plan("t"), "Google AI Pro (g1-pro-tier)")
 
     def test_bare_string_tier_is_accepted(self):
         with mock.patch.object(mod, "_post", return_value=({"currentTier": "free-tier"}, None)):
@@ -330,7 +330,7 @@ class FetchTests(unittest.TestCase):
         result = _fetch()
         self.assertIsNone(result.unavailable_reason)
         self.assertEqual(result.label, "antigravity")
-        self.assertEqual(result.plan, "Google AI Pro")
+        self.assertEqual(result.plan, "Google AI Pro (g1-pro-tier)")
         self.assertEqual(len(result.windows), 4)
         self.assertTrue(result.has_data())
 

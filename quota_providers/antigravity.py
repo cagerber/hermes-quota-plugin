@@ -407,6 +407,9 @@ def _window(bucket: dict[str, Any], label: str) -> Optional[QuotaWindow]:
 def _plan(access_token: str, *, timeout: float = _TIMEOUT_S) -> Optional[str]:
     """Plan name from loadCodeAssist, or None. paidTier first: Google reports
     currentTier as ``free-tier`` even on a paid subscription (verified live).
+
+    Include the tier id when present: Google gives the $100 and $200 Ultra
+    tiers the same display name, so the id is the only unambiguous part.
     """
     data, _status = _post(_LOAD_PATH, access_token, timeout=timeout)
     if not isinstance(data, dict):
@@ -417,8 +420,12 @@ def _plan(access_token: str, *, timeout: float = _TIMEOUT_S) -> Optional[str]:
             return tier.strip()
         if isinstance(tier, dict):
             name = tier.get("name")
+            tier_id = tier.get("id")
             if isinstance(name, str) and name.strip():
-                return name.strip()
+                name = name.strip()
+                if isinstance(tier_id, str) and tier_id.strip():
+                    return f"{name} ({tier_id.strip()})"
+                return name
     return None
 
 
