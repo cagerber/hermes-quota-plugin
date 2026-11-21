@@ -15,7 +15,9 @@ Credential: Windows Credential Manager ``gemini:antigravity`` (CredReadW), else
 macOS Keychain service ``gemini`` account ``antigravity`` (agy wraps that password
 with ``go-keyring-base64:``; unwrap it before JSON parse, the same way Orca
 does), else the Antigravity CLI
-token file ``~/.gemini/antigravity-cli/antigravity-oauth-token`` (Linux). Antigravity 2.0 moved
+token file ``~/.gemini/antigravity-cli/antigravity-oauth-token`` (Linux), else
+the GNOME Secret Service item service ``gemini`` account ``antigravity`` written
+by agy 1.5 through zalando/go-keyring. Antigravity 2.0 moved
 its Google OAuth out of ``state.vscdb`` into the OS secret store, so that is the
 live source; the vscdb decoders keyed on the old ``oauthTokenInfoSentinelKey``
 return null on current builds and are deliberately not implemented. This is an
@@ -40,6 +42,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -169,6 +172,57 @@ def _linux_blob() -> Optional[bytes]:
         return None
 
 
+def _linux_secret_service_blob() -> Optional[bytes]:
+    """Read the same JSON blob from GNOME Secret Service, or None.
+
+    Antigravity 1.5 on Linux writes the token through zalando/go-keyring into
+    the login collection (service ``gemini``, username ``antigravity``) and
+    may not create the legacy file at all. Hermes' bundled 3.14 interpreter
+    does not ship ``secretstorage``, so the read runs in a short-lived helper
+    under a system Python. The helper returns base64; no secret is logged.
+    """
+    if sys.platform != "linux":
+        return None
+    helper = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts",
+        "antigravity_token.py",
+    )
+    if not os.path.isfile(helper):
+        return None
+    candidates = ["/usr/bin/python3", sys.executable]
+    seen: set[str] = set()
+    for executable in candidates:
+        if not executable or executable in seen:
+            continue
+        seen.add(executable)
+        try:
+            done = subprocess.run(
+                [executable, str(helper)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if done.returncode != 0 or not (done.stdout or "").strip():
+            continue
+        try:
+            payload = json.loads(done.stdout)
+        except ValueError:
+            continue
+        encoded = payload.get("secret_b64") if isinstance(payload, dict) else None
+        if not isinstance(encoded, str) or not encoded:
+            continue
+        try:
+            secret = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            continue
+        if secret:
+            return secret
+    return None
+
+
 _GO_KEYRING_B64 = "go-keyring-base64:"
 _GO_KEYRING_HEX = "go-keyring-encoded:"
 
@@ -210,7 +264,7 @@ def _load_credential() -> Optional[dict[str, Any]]:
 
     Readers are called defensively: a faulting one must not escape fail-open.
     """
-    for reader in (_windows_blob, _macos_blob, _linux_blob):
+    for reader in (_windows_blob, _macos_blob, _linux_blob, _linux_secret_service_blob):
         try:
             blob = reader()
             if not blob:

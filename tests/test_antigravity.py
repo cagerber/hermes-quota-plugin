@@ -142,7 +142,8 @@ class CredentialTests(unittest.TestCase):
     def test_broken_go_keyring_wrapper_is_no_credential(self):
         with mock.patch.object(mod, "_windows_blob", return_value=None), \
                 mock.patch.object(mod, "_macos_blob", return_value=b"go-keyring-base64:!!!"), \
-                mock.patch.object(mod, "_linux_blob", return_value=None):
+                mock.patch.object(mod, "_linux_blob", return_value=None), \
+                mock.patch.object(mod, "_linux_secret_service_blob", return_value=None):
             self.assertIsNone(mod._load_credential())
 
     def test_garbage_blob_is_no_credential(self):
@@ -150,7 +151,8 @@ class CredentialTests(unittest.TestCase):
         # otherwise leak into this assertion.
         with mock.patch.object(mod, "_windows_blob", return_value=b"\x01not json"), \
                 mock.patch.object(mod, "_macos_blob", return_value=None), \
-                mock.patch.object(mod, "_linux_blob", return_value=None):
+                mock.patch.object(mod, "_linux_blob", return_value=None), \
+                mock.patch.object(mod, "_linux_secret_service_blob", return_value=None):
             self.assertIsNone(mod._load_credential())
 
     def test_reader_crash_falls_through(self):
@@ -178,8 +180,22 @@ class CredentialTests(unittest.TestCase):
         with mock.patch.object(mod.sys, "platform", "linux"), \
                 mock.patch.object(mod, "_windows_blob", return_value=None), \
                 mock.patch.object(mod, "_macos_blob", return_value=None), \
+                mock.patch.object(mod, "_linux_secret_service_blob", return_value=None), \
                 mock.patch("builtins.open", side_effect=OSError("nope")):
             self.assertIsNone(mod._load_credential())
+
+    def test_linux_secret_service_fallback_is_read(self):
+        # agy 1.5 writes through go-keyring; the legacy file can be absent.
+        blob = json.dumps({"token": {"access_token": "ya29.keyring"}}).encode("utf-8")
+        with mock.patch.object(mod.sys, "platform", "linux"), \
+                mock.patch.object(mod, "_windows_blob", return_value=None), \
+                mock.patch.object(mod, "_macos_blob", return_value=None), \
+                mock.patch.object(mod, "_linux_blob", return_value=None), \
+                mock.patch.object(mod, "_linux_secret_service_blob", return_value=blob):
+            cred = mod._load_credential()
+        self.assertIsNotNone(cred)
+        assert cred is not None
+        self.assertEqual(cred["token"]["access_token"], "ya29.keyring")
 
 
 class TokenTests(unittest.TestCase):
